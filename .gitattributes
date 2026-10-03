@@ -1,0 +1,2 @@
+# Preserve file contents exactly, including LF and CRLF line endings.
+* -text

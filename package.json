@@ -1,0 +1,17 @@
+{
+  "name": "ai-visibility-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": ["apps/*", "packages/*"],
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c cyan,magenta \"npm run dev -w @visibility/api\" \"npm run dev -w @visibility/web\"",
+    "build": "npm run build -w @visibility/api && npm run build -w @visibility/web",
+    "start": "concurrently -k -n api,web \"npm run start -w @visibility/api\" \"npm run start -w @visibility/web\"",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "npm run lint -w @visibility/web",
+    "test": "npm run test -w @visibility/api",
+    "check": "npm run typecheck && npm run lint && npm test"
+  },
+  "devDependencies": { "concurrently": "^9.2.1", "typescript": "^5.9.3", "@types/node": "^24.0.0" }
+}
