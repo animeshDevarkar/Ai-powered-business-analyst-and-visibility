@@ -2,13 +2,14 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { requestId } from "hono/request-id";
 import { logger } from "hono/logger";
-import { createProjectSchema, createPromptSchema, memoryInputSchema } from "@visibility/core";
+import { createProjectSchema, createPromptSchema, memoryInputSchema, contentInputSchema, generationInputSchema } from "@visibility/core";
+import { ProviderContentService, ContentServiceError, type ContentService } from "./content-service.js";
 import type { WorkspaceRepository } from "./repository.js";
 import type { AuthGateway } from "./auth.js";
 import type { AuthUser } from "@visibility/core";
 import { ProjectCreator, WebsiteAlreadyExistsError } from "./project-creation.js";
 
-export function createApp(repositoryForUser: (userId: string) => WorkspaceRepository, auth: AuthGateway, projects: ProjectCreator) {
+export function createApp(repositoryForUser: (userId: string) => WorkspaceRepository, auth: AuthGateway, projects: ProjectCreator, content: ContentService = new ProviderContentService()) {
   const app = new Hono<{ Variables: { repository: WorkspaceRepository; user: AuthUser } }>();
   app.use("*", requestId());
   app.use("*", logger());
@@ -104,8 +105,57 @@ export function createApp(repositoryForUser: (userId: string) => WorkspaceReposi
     c.header("Content-Disposition", `attachment; filename="visibility-${workspace.project.id}.json"`);
     return c.json({ schemaVersion: 1, exportedAt: new Date().toISOString(), data: workspace });
   });
+  app.get("/api/projects/:id/content/config", async (c) => {
+    if (!await c.get("repository").getWorkspace(c.req.param("id"))) return c.json({ error: { code: "NOT_FOUND", message: "Project not found" } }, 404);
+    return c.json({ data: content.capabilities(c.req.param("id")) });
+  });
+  app.post("/api/projects/:id/content/generate", async (c) => {
+    const workspace = await c.get("repository").getWorkspace(c.req.param("id"));
+    if (!workspace) return c.json({ error: { code: "NOT_FOUND", message: "Project not found" } }, 404);
+    const parsed = generationInputSchema.safeParse(await c.req.json());
+    if (!parsed.success) return c.json({ error: { code: "VALIDATION_ERROR", message: "Check the topic, tone and platform" } }, 400);
+    return c.json({ data: await content.generate(workspace, parsed.data) });
+  });
+  app.post("/api/projects/:id/content", async (c) => {
+    const parsed = contentInputSchema.safeParse(await c.req.json());
+    if (!parsed.success) return c.json({ error: { code: "VALIDATION_ERROR", message: "Check the title, body, platform and character limit", details: parsed.error.flatten() } }, 400);
+    const draft = await c.get("repository").saveContent(c.req.param("id"), parsed.data);
+    if (!draft) return c.json({ error: { code: "NOT_FOUND", message: "Project not found" } }, 404);
+    return c.json({ data: draft }, 201);
+  });
+  app.put("/api/projects/:id/content/:contentId", async (c) => {
+    const parsed = contentInputSchema.safeParse(await c.req.json());
+    if (!parsed.success) return c.json({ error: { code: "VALIDATION_ERROR", message: "Check the title, body, platform and character limit", details: parsed.error.flatten() } }, 400);
+    const draft = await c.get("repository").saveContent(c.req.param("id"), parsed.data, c.req.param("contentId"));
+    if (!draft) return c.json({ error: { code: "NOT_FOUND", message: "Editable draft not found in this project" } }, 404);
+    return c.json({ data: draft });
+  });
+  app.delete("/api/projects/:id/content/:contentId", async (c) => {
+    if (!await c.get("repository").deleteContent(c.req.param("id"), c.req.param("contentId"))) return c.json({ error: { code: "NOT_FOUND", message: "Editable draft not found in this project" } }, 404);
+    return c.body(null, 204);
+  });
+  app.post("/api/projects/:id/content/:contentId/publish", async (c) => {
+    const repository = c.get("repository");
+    const projectId = c.req.param("id"), id = c.req.param("contentId");
+    const draft = (await repository.getWorkspace(projectId))?.content.find((item) => item.id === id);
+    if (!draft) return c.json({ error: { code: "NOT_FOUND", message: "Post not found in this project" } }, 404);
+    const approval = await c.req.json();
+    if (approval?.approved !== true || approval?.updatedAt !== draft.updatedAt) return c.json({ error: { code: "APPROVAL_REQUIRED", message: "Review and approve the latest saved post before publishing" } }, 409);
+    content.validatePublishing(projectId, draft);
+    // Lock before the external write to prevent concurrent clicks from posting twice.
+    const locked = await repository.beginPublish(projectId, id, draft.updatedAt);
+    if (!locked) return c.json({ error: { code: "PUBLISH_CONFLICT", message: "This post changed or was already submitted. Refresh before continuing." } }, 409);
+    let externalId: string;
+    try { externalId = await content.publish(projectId, locked); }
+    catch {
+      await repository.finishPublish(projectId, id, null);
+      return c.json({ error: { code: "PUBLISH_UNKNOWN", message: "Publication was not confirmed. Check the social account before creating another post to avoid duplicates." } }, 502);
+    }
+    return c.json({ data: await repository.finishPublish(projectId, id, externalId) });
+  });
   app.notFound((c) => c.json({ error: { code: "NOT_FOUND", message: "Endpoint not found" } }, 404));
   app.onError((error, c) => {
+    if (error instanceof ContentServiceError) return c.json({ error: { code: error.code, message: error.message } }, error.status);
     if (error instanceof SyntaxError) return c.json({ error: { code: "INVALID_JSON", message: "Request body must be valid JSON" } }, 400);
     const id = c.get("requestId");
     console.error(`[${id}]`, error);

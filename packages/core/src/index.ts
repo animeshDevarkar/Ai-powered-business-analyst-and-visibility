@@ -1,7 +1,10 @@
 import { z } from "zod";
 
 const text = (max: number) => z.string().trim().min(1).max(max);
-const httpUrl = z.url().refine((value) => ["http:", "https:"].includes(new URL(value).protocol), "Use an HTTP or HTTPS URL");
+const httpUrl = z.url().refine((value) => {
+  try { return ["http:", "https:"].includes(new URL(value).protocol); }
+  catch { return false; }
+}, "Use an HTTP or HTTPS URL");
 
 // A website is identified by its hostname, across schemes, ports, and paths.
 // Keep distinct subdomains separate, while treating www as the root website.
@@ -43,6 +46,28 @@ export type PromptInput = z.infer<typeof createPromptSchema>;
 export type Project = ProjectInput & { id: string; createdAt: string; updatedAt: string };
 export type MemoryVersion = MemoryInput & { id: string; projectId: string; version: number; createdAt: string };
 export type Prompt = PromptInput & { id: string; projectId: string; createdAt: string };
+export const socialPlatforms = { instagram: "Instagram", linkedin: "LinkedIn", facebook: "Facebook" } as const;
+export type SocialPlatform = keyof typeof socialPlatforms;
+export const contentInputSchema = z.object({
+  kind: z.enum(["social", "blog"]),
+  platform: z.enum(["instagram", "linkedin", "facebook"]).nullable(),
+  title: text(200), body: text(50000), excerpt: z.string().trim().max(500).default(""),
+  imageUrl: z.union([httpUrl, z.literal("")]).default(""),
+  keywords: z.string().trim().max(500).default(""),
+}).superRefine((value, ctx) => {
+  if ((value.kind === "social") !== (value.platform !== null)) ctx.addIssue({ code: "custom", path: ["platform"], message: "Choose a platform for social posts only" });
+  const limit = value.platform === "instagram" ? 2200 : value.platform === "linkedin" ? 3000 : 63206;
+  if (value.kind === "social" && value.body.length > limit) ctx.addIssue({ code: "custom", path: ["body"], message: `Caption exceeds ${limit} characters` });
+});
+export const generationInputSchema = z.object({
+  kind: z.enum(["social", "blog"]), platform: z.enum(["instagram", "linkedin", "facebook"]).nullable(),
+  topic: text(2000), tone: z.enum(["professional", "friendly", "educational", "bold"]),
+  keywords: z.string().trim().max(500).default(""),
+}).refine((value) => (value.kind === "social") === (value.platform !== null), "Choose a platform for social posts only");
+export type ContentInput = z.infer<typeof contentInputSchema>;
+export type GenerationInput = z.infer<typeof generationInputSchema>;
+export type ContentDraft = ContentInput & { id: string; projectId: string; createdAt: string; updatedAt: string; status: "draft" | "publishing" | "published" | "publish_unknown"; externalId: string | null; publishedAt: string | null };
+export type ContentCapabilities = { generation: boolean; platforms: Record<SocialPlatform, { ready: boolean; label: string }> };
 export type Evidence = { id: string; projectId: string; url: string; capturedAt: string; artifactKey: string; kind: "crawl" | "answer" | "source" };
 export type Issue = { id: string; projectId: string; url: string; title: string; severity: "critical" | "high" | "medium" | "low"; confidence: number; evidenceIds: string[]; proposedFix: string; validationMethod: string; status: "open" | "in_review" | "resolved" };
 export type Observation = { id: string; projectId: string; promptId: string; observedAt: string; provider: string; collectionMethod: "dfs_llm_scraper" | "dfs_ai_mode" | "llm_api"; model: string | null; location: string | null; language: string | null; device: string | null; rawAnswerArtifactKey: string; mentions: string[]; citations: string[]; parserConfidence: number };
@@ -55,6 +80,7 @@ export type ProjectWorkspace = {
   memory: MemoryVersion | null;
   memoryVersions: MemoryVersion[];
   prompts: Prompt[];
+  content: ContentDraft[];
   issues: Issue[];
   observations: Observation[];
   evidence: Evidence[];

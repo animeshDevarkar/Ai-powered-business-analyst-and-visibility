@@ -10,6 +10,8 @@ import { authClient } from "@/lib/auth-client";
 import { useRouter } from "next/navigation";
 import { LogOut } from "lucide-react";
 import type { AuthUser } from "@visibility/core";
+import { ContentStudio } from "./content-studio";
+import { PenLine, Share2, FileText } from "lucide-react";
 
 const tabs = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
@@ -20,6 +22,8 @@ const tabs = [
   { id: "review", label: "Review queue", icon: ShieldCheck },
   { id: "integrations", label: "Integrations", icon: Link2 },
   { id: "activity", label: "Activity & costs", icon: ActivityIcon },
+  { id: "social", label: "Social Media", icon: Share2 },
+  { id: "blogs", label: "Blogs", icon: FileText },
 ] as const;
 type Tab = typeof tabs[number]["id"];
 const formatDate = (value: string) => new Date(value).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
@@ -113,9 +117,9 @@ export function Workspace({ user }: { user: AuthUser }) {
       </select></div>
       <button className="new-project" onClick={() => setModal("project")} disabled={busy}><Plus size={15} /> Create project</button>
       <div className="nav-label">PROJECT</div>
-      <nav aria-label="Project navigation">{tabs.map(({ id, label, icon: Icon }) => <button key={id} className={`nav-item ${tab === id ? "active" : ""}`} onClick={() => { setTab(id); setNotice(""); }} aria-current={tab === id ? "page" : undefined}>
+      <nav aria-label="Project navigation">{tabs.filter((item) => item.id !== "social" && item.id !== "blogs").map(({ id, label, icon: Icon }) => <button key={id} className={`nav-item ${tab === id ? "active" : ""}`} onClick={() => { setTab(id); setNotice(""); }} aria-current={tab === id ? "page" : undefined}>
         <Icon size={18} /><span>{label}</span>{id === "issues" && current && <span className="nav-count">{current.issues.length}</span>}
-      </button>)}</nav>
+      </button>)}<div className="studio-nav-group" role="group" aria-label="Content Studio"><div className="studio-nav-title"><PenLine size={18} /><span>Content Studio</span></div>{tabs.filter((item) => item.id === "social" || item.id === "blogs").map(({ id, label, icon: Icon }) => <button key={id} className={`nav-item studio-nav-child ${tab === id ? "active" : ""}`} onClick={() => { setTab(id); setNotice(""); }} aria-current={tab === id ? "page" : undefined}><Icon size={16} /><span>{label}</span></button>)}</div></nav>
       <div className="sidebar-footer"><div className="local-dot" /><div><strong>Local development</strong><span>Your data stays in this workspace</span></div><CircleHelp size={17} aria-hidden="true" /></div>
     </aside>
 
@@ -127,6 +131,7 @@ export function Workspace({ user }: { user: AuthUser }) {
         {loading ? <div className="loading"><LoaderCircle className="spin" size={24} /> Loading your workspace</div> : !selected ? <Welcome onCreate={() => setModal("project")} /> : !current ? <div className="loading"><LoaderCircle className="spin" size={24} /> Loading project</div> : <>
           <div className="page-heading"><div><div className="eyebrow">AI SEARCH VISIBILITY</div><h1>{tabs.find((item) => item.id === tab)?.label}</h1><p>{tab === "overview" ? "Understand where you stand. Build on what you can prove." : current.project.website}</p></div><a className="button secondary" href={`/api/projects/${selected}/export`} download><ArrowDownToLine size={16} /> Export project</a></div>
           {tab === "overview" && <Overview workspace={current} onTab={setTab} />}
+          {(tab === "social" || tab === "blogs") && <ContentStudio key={`${selected}:${tab}`} workspace={current} kind={tab === "social" ? "social" : "blog"} onChanged={() => setReload((value) => value + 1)} />}
           {tab === "memory" && <Memory key={`${selected}:${current.memory?.version ?? 0}`} workspace={current} busy={busy} onSave={(input) => action(async () => { await api(`/projects/${selected}/memory`, { method: "PUT", body: JSON.stringify(input) }); }, "Business memory saved as a new version.")} />}
           {tab === "prompts" && <section className="panel"><div className="panel-heading"><div><h2>Your customer questions</h2><p>Define what to observe, across engines and locales.</p></div><button className="button primary" onClick={() => setModal("prompt")}><Plus size={16} /> Add prompt</button></div>
             {current.prompts.length ? <div className="table-wrap"><table><thead><tr><th>Question</th><th>Engine / locale</th><th>Intent</th><th>Priority</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>{current.prompts.map((prompt) => <tr key={prompt.id}><td className="question-cell">{prompt.question}</td><td>{engines[prompt.engine]}<small>{prompt.locale}</small></td><td><span className="pill">{prompt.intent}</span></td><td><span className={`priority ${prompt.priority}`}>{prompt.priority}</span></td><td><button className="icon-button" aria-label={`Remove prompt: ${prompt.question}`} disabled={busy} onClick={() => action(async () => { await api(`/projects/${selected}/prompts/${prompt.id}`, { method: "DELETE" }); }, "Prompt removed.")}><Trash2 size={16} /></button></td></tr>)}</tbody></table></div> : <Empty icon={<MessageSquare size={27} />} title="Start with a real customer question" description="Save discovery, comparison, or buying questions. Answer collection will be connected in the next phase." />}
@@ -134,9 +139,9 @@ export function Workspace({ user }: { user: AuthUser }) {
           </section>}
           {tab === "issues" && <section className="panel"><Empty icon={<ClipboardCheck size={28} />} title="Evidence comes before recommendations" description="The crawler will attach affected URLs, evidence, severity, confidence, and validation steps to each issue. No crawl has run for this project." /><div className="panel-note">Next milestone: crawl access, titles, descriptions, and canonical checks.</div></section>}
           {tab === "observations" && <section className="panel"><Empty icon={<Radio size={28} />} title="No answers collected yet" description="Each observation will preserve the raw answer, citations, provider, collection method, locale, timestamp, and available model metadata." /><div className="panel-note">API answers and consumer interface samples will remain distinguishable. Missing metadata stays unknown.</div></section>}
-          {tab === "review" && <section className="panel"><Empty icon={<ShieldCheck size={28} />} title="Every published change needs your approval" description="Proposals will arrive here with evidence, a diff or draft, validation results, a preview, and a rollback plan. Publishing integrations are planned." /><div className="panel-note">The foundation does not create pull requests, merge code, or publish content.</div></section>}
+          {tab === "review" && <section className="panel"><Empty icon={<ShieldCheck size={28} />} title="Every published change needs your approval" description="Proposals will arrive here with evidence, a diff or draft, validation results, a preview, and a rollback plan. Social posts can be reviewed and published from Content Studio." /><div className="panel-note">Review social posts in Content Studio before publishing. Blog drafts can be exported as Markdown.</div></section>}
           {tab === "integrations" && <Integrations />}
-          {tab === "activity" && <><div className="stats-grid two"><Stat label="Provider spend" value="$0.00" detail="No paid jobs have run" icon={<ActivityIcon size={18} />} /><Stat label="Job receipts" value="0" detail="Metering adapter planned" icon={<BookOpen size={18} />} /></div><section className="panel"><div className="panel-heading"><div><h2>Project activity</h2><p>A record of changes made in this workspace.</p></div></div><div className="activity-list">{current.activity.map((item) => <div className="activity-row" key={item.id}><span className="activity-dot" /><div><strong>{item.action}</strong><span>{formatDate(item.createdAt)}</span></div><span className="pill">Local user</span></div>)}</div></section></>}
+          {tab === "activity" && <><div className="stats-grid two"><Stat label="Provider spend" value="—" detail="AI generation costs are not yet metered" icon={<ActivityIcon size={18} />} /><Stat label="Job receipts" value="0" detail="Metering adapter planned" icon={<BookOpen size={18} />} /></div><section className="panel"><div className="panel-heading"><div><h2>Project activity</h2><p>A record of changes made in this workspace.</p></div></div><div className="activity-list">{current.activity.map((item) => <div className="activity-row" key={item.id}><span className="activity-dot" /><div><strong>{item.action}</strong><span>{formatDate(item.createdAt)}</span></div><span className="pill">Local user</span></div>)}</div></section></>}
         </>}
       </main>
       <footer className="main-footer"><span>Evidence → proposal → approval → measurement</span><span>Built for an open, inspectable workflow.</span></footer>

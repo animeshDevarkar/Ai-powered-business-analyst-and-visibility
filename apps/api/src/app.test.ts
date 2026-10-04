@@ -9,6 +9,8 @@ import { createAuthGateway, type AuthGateway } from "./auth.js";
 import { ProjectCreator, WebsiteAlreadyExistsError, type WebsiteClaim, type WebsiteRegistry } from "./project-creation.js";
 import { loadExistingWebsiteClaims } from "./website-registry.js";
 import { websiteKey, type Project } from "@visibility/core";
+import { ProviderContentService, type ContentService } from "./content-service.js";
+import type { ContentInput, ContentCapabilities } from "@visibility/core";
 
 class TestWebsiteRegistry implements WebsiteRegistry {
   readonly claims = new Map<string, WebsiteClaim>();
@@ -33,6 +35,102 @@ const testAuth: AuthGateway = {
   },
   async close() {},
 };
+
+test("content drafts persist, enforce scope and approval, and prevent duplicate publication", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "visibility-content-test-"));
+  try {
+    const repository = new JsonWorkspaceRepository(join(directory, "owner.json"));
+    const otherRepository = new JsonWorkspaceRepository(join(directory, "other.json"));
+    let calls = 0;
+    const config: ContentCapabilities = { generation: true, platforms: { instagram: { ready: true, label: "IG" }, linkedin: { ready: true, label: "LI" }, facebook: { ready: true, label: "FB" } } };
+    const service: ContentService = { capabilities: () => config, async generate(_workspace, input) { return { kind: input.kind, platform: input.platform, title: "Generated", body: "Generated body", excerpt: "", imageUrl: "", keywords: input.keywords }; }, validatePublishing(_id, input) { if (input.kind !== "social") throw new Error("Cannot publish blog"); }, async publish() { calls++; return "receipt-123"; } };
+    const app = createApp((id) => id === "owner" ? repository : otherRepository, testAuth, testProjectCreator(), service);
+    const request = (path: string, method = "GET", body?: unknown, user = "owner") => app.request(path, { method, headers: { "Content-Type": "application/json", "x-test-user": user }, body: body === undefined ? undefined : JSON.stringify(body) });
+    const project = await repository.createProject({ name: "Content", website: "https://content.example", description: "" });
+    const other = await repository.createProject({ name: "Other", website: "https://other-content.example", description: "" });
+    const base = `/api/projects/${project.id}/content`;
+    const input: ContentInput = { kind: "social", platform: "linkedin", title: "Launch", body: "Hello audience", excerpt: "", keywords: "analytics", imageUrl: "" };
+    assert.equal((await request(base, "POST", { ...input, platform: null })).status, 400);
+    assert.equal((await request(base, "POST", { ...input, body: "x".repeat(3001) })).status, 400);
+    assert.equal((await request(base, "POST", input, "anonymous")).status, 401);
+    assert.equal((await request(base, "POST", input, "other")).status, 404);
+    const created = await request(base, "POST", input);
+    assert.equal(created.status, 201);
+    const draft = (await created.json()).data;
+    assert.equal((await request(`${base}/${draft.id}`, "PUT", { ...input, body: "Updated" }, "other")).status, 404);
+    assert.equal((await request(`/api/projects/${other.id}/content/${draft.id}`, "DELETE")).status, 404);
+    assert.equal((await request(`${base}/config`, "GET", undefined, "other")).status, 404);
+    assert.equal((await request(`${base}/generate`, "POST", { kind: "blog", platform: null, topic: "Analytics", tone: "educational", keywords: "" })).status, 200);
+    const blogResponse = await request(base, "POST", { ...input, kind: "blog", platform: null, body: "## Introduction\n\nBlog content" });
+    assert.equal(blogResponse.status, 201);
+    const blog = (await blogResponse.json()).data;
+    const restored = await new JsonWorkspaceRepository(join(directory, "owner.json")).getWorkspace(project.id);
+    assert.equal(restored?.content.length, 2);
+    assert.equal((await (await request(`/api/projects/${project.id}/export`)).json()).data.content.length, 2);
+    assert.equal((await request(`${base}/${draft.id}/publish`, "POST", { approved: false, updatedAt: draft.updatedAt })).status, 409);
+    assert.equal((await request(`${base}/${draft.id}/publish`, "POST", { approved: true, updatedAt: "stale" })).status, 409);
+    assert.equal(calls, 0);
+    const responses = await Promise.all([request(`${base}/${draft.id}/publish`, "POST", { approved: true, updatedAt: draft.updatedAt }), request(`${base}/${draft.id}/publish`, "POST", { approved: true, updatedAt: draft.updatedAt })]);
+    assert.equal(responses.filter((response) => response.status === 200).length, 1);
+    assert.equal(responses.filter((response) => response.status === 409).length, 1);
+    assert.equal(calls, 1);
+    const published = (await repository.getWorkspace(project.id))!.content.find((item) => item.id === draft.id)!;
+    assert.equal(published.status, "published");
+    assert.equal(published.externalId, "receipt-123");
+    assert.equal((await request(`${base}/${draft.id}`, "PUT", input)).status, 404);
+    assert.equal((await request(`${base}/${draft.id}`, "DELETE")).status, 404);
+    assert.equal((await request(`${base}/${blog.id}`, "DELETE")).status, 204);
+    const uncertain = (await (await request(base, "POST", input)).json()).data;
+    service.publish = async () => { calls++; throw new Error("Provider timeout"); };
+    assert.equal((await request(`${base}/${uncertain.id}/publish`, "POST", { approved: true, updatedAt: uncertain.updatedAt })).status, 502);
+    assert.equal((await repository.getWorkspace(project.id))!.content.find((item) => item.id === uncertain.id)!.status, "publish_unknown");
+    assert.equal((await request(`${base}/${uncertain.id}/publish`, "POST", { approved: true, updatedAt: uncertain.updatedAt })).status, 409);
+    assert.equal(calls, 2);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("provider adapters keep credentials private, scope accounts, and use correct payloads", async () => {
+  const calls: { url: string; init?: RequestInit }[] = [];
+  const fakeFetch: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    if (String(url).includes("openai")) return Response.json({ status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify({ title: "Article", body: "## Helpful content", excerpt: "Summary" }) }] }] });
+    if (String(url).includes("linkedin")) return new Response(null, { status: 201, headers: { "x-restli-id": "urn:li:share:123" } });
+    if (String(url).includes("status_code")) return Response.json({ status_code: "FINISHED" });
+    return Response.json({ id: "123" });
+  };
+  const env = { OPENAI_API_KEY: "private-ai-token", CONTENT_AI_MODEL: "test-model", META_GRAPH_API_VERSION: "v99.0", CONTENT_SOCIAL_ACCOUNTS: JSON.stringify(["instagram", "linkedin", "facebook"].map((platform) => ({ projectId: "project", platform, accessToken: "private-social-token", accountId: platform === "linkedin" ? "urn:li:person:123" : "123", label: platform }))) };
+  const provider = new ProviderContentService(env, fakeFetch);
+  assert.equal(provider.capabilities("project").platforms.linkedin.ready, true);
+  assert.equal(provider.capabilities("other").platforms.linkedin.ready, false);
+  assert.doesNotMatch(JSON.stringify(provider.capabilities("project")), /private-/);
+  const input: ContentInput = { kind: "social", platform: "linkedin", title: "Launch", body: "Hello", excerpt: "", imageUrl: "", keywords: "" };
+  await assert.rejects(provider.publish("other", input), /Connect/);
+  await assert.rejects(provider.publish("project", { ...input, platform: "instagram" }), /HTTPS image/);
+  assert.equal(calls.length, 0);
+  assert.equal(await provider.publish("project", input), "urn:li:share:123");
+  assert.equal(JSON.parse(String(calls[0].init?.body)).author, "urn:li:person:123");
+  await provider.publish("project", { ...input, platform: "facebook" });
+  assert.match(calls[1].url, /\/123\/feed$/);
+  assert.equal(new URLSearchParams(String(calls[1].init?.body)).get("message"), "Hello");
+  await provider.publish("project", { ...input, platform: "instagram", imageUrl: "https://example.com/image.jpg" });
+  assert.match(calls[2].url, /\/media$/);
+  assert.match(calls[3].url, /fields=status_code/);
+  assert.match(calls[4].url, /\/media_publish$/);
+  assert.equal(new URLSearchParams(String(calls[4].init?.body)).get("creation_id"), "123");
+  const directory = await mkdtemp(join(tmpdir(), "visibility-generation-test-"));
+  try {
+    const repository = new JsonWorkspaceRepository(join(directory, "store.json"));
+    const project = await repository.createProject({ name: "Generate", website: "https://generation.example", description: "" });
+    const workspace = (await repository.getWorkspace(project.id))!;
+    const brief = { kind: "blog" as const, platform: null, topic: "Useful analytics", tone: "educational" as const, keywords: "analytics" };
+    const generated = await provider.generate(workspace, brief);
+    assert.equal(generated.kind, "blog");
+    assert.equal(generated.body, "## Helpful content");
+    assert.equal((await repository.getWorkspace(project.id))!.content.length, 0);
+    await assert.rejects(new ProviderContentService({}, fakeFetch).generate(workspace, brief), /API key/);
+    await assert.rejects(new ProviderContentService(env, async () => Response.json({ status: "incomplete", output: [] })).generate(workspace, brief), /incomplete or invalid/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
 
 test("project, versioned memory, scoped prompts, persistence, and exports", async () => {
   const directory = await mkdtemp(join(tmpdir(), "visibility-test-"));

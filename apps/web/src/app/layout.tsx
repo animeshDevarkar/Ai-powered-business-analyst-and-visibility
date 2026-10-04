@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 import "./theme.css";
 import "./auth.css";
+import "./content-studio.css";
 
 // Apply the saved preference before the page paints to avoid a light-mode flash.
 const themeScript = `(() => {
